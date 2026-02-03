@@ -1,0 +1,6 @@
+bin/
+obj/
+*.user
+*.suo
+.vs/
+base_calib_updated.txt
