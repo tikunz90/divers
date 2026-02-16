@@ -1,129 +1,88 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
-using System.IO;
 using System.Linq;
 
-namespace StageCalibration
-{
-    public enum InterpolationMethod
-    {
-        Bilinear,
-        BicubicCatmullRom,
-        CubicSplineSeparable
+namespace StageCalibration {
+    public struct Offset2D {
+        public double XOffset;
+        public double YOffset;
+
+        public Offset2D(double xOffset, double yOffset) {
+            XOffset = xOffset;
+            YOffset = yOffset;
+        }
     }
 
-    public enum OutOfGridPolicy
-    {
+    public enum OutOfGridPolicy {
         Clamp,
         ReturnNaN,
         Throw
     }
 
-    public enum SplineBoundary
-    {
-        Natural, // second derivative = 0 at ends
-        Clamped  // first derivative specified at ends
-    }
+    public class StageCalibrationGrid {
+        private Dictionary<(int, int), Offset2D> _offsets;
+        private int _rows;
+        private int _cols;
+        private double _xStep;
+        private double _yStep;
+        private OutOfGridPolicy _outOfGridPolicy;
 
-    public readonly record struct Offset2D(double Xoff, double Yoff);
-
-    /// <summary>
-    /// Parses and interpolates planar 2D stage calibration tables:
-    /// Header:
-    ///   X:{totalWidthMm};{columns}
-    ///   Y:{totalHeightMm};{rows}
-    /// Then exactly rows*cols lines:
-    ///   {nomX};{actX};{nomY};{actY};
-    /// Offsets are stored as (act - nom).
-    /// Grid spacing must be uniform (but may differ between stages).
-    /// </summary>
-    public sealed class StageCalibrationGrid
-    {
-        public int Columns { get; }
-        public int Rows { get; }
-        public double TotalWidthMm { get; }
-        public double TotalHeightMm { get; }
-
-        public double[] X { get; } // size Columns
-        public double[] Y { get; } // size Rows
-
-        public double Dx { get; }
-        public double Dy { get; }
-
-        /// <summary>[row, col] => [yIndex, xIndex]</summary>
-        public Offset2D[,] NodeOffsets { get; }
-
-        private const double UniformTol = 1e-9;
-
-        internal StageCalibrationGrid(
-            int columns, int rows,
-            double totalWidthMm, double totalHeightMm,
-            double[] x, double[] y,
-            Offset2D[,] nodeOffsets)
-        {
-            Columns = columns;
-            Rows = rows;
-            TotalWidthMm = totalWidthMm;
-            TotalHeightMm = totalHeightMm;
-            X = x;
-            Y = y;
-            NodeOffsets = nodeOffsets;
-
-            Dx = InferUniformStep(X, "X");
-            Dy = InferUniformStep(Y, "Y");
+        public StageCalibrationGrid(double xStep, double yStep, OutOfGridPolicy policy) {
+            _offsets = new Dictionary<(int, int), Offset2D>();
+            _xStep = xStep;
+            _yStep = yStep;
+            _outOfGridPolicy = policy;
         }
 
-        public static StageCalibrationGrid ParseFile(string path)
-            => ParseLines(File.ReadLines(path));
+        public void ParseCalibrationTable(string[] lines) {
+            // Assume the first line contains headers
+            var dimensions = lines[0].Split(';').Select(d => d.Split(':')[1]).ToArray();
+            _cols = int.Parse(dimensions[0]);
+            _rows = int.Parse(dimensions[1]);
+            
+            for (int i = 1; i < lines.Length; i++) {
+                var values = lines[i].Split(';');
+                int nomX = int.Parse(values[0]);
+                double actX = double.Parse(values[1]);
+                int nomY = int.Parse(values[2]);
+                double actY = double.Parse(values[3]);
 
-        public static StageCalibrationGrid ParseText(string text)
-            => ParseLines(ReadLines(text));
-
-        private static IEnumerable<string> ReadLines(string text)
-        {
-            using var sr = new StringReader(text);
-            string? line;
-            while ((line = sr.ReadLine()) != null)
-                yield return line;
-        }
-
-        public static StageCalibrationGrid ParseLines(IEnumerable<string> lines)
-        {
-            using var e = lines.GetEnumerator();
-
-            string lineX = NextNonEmpty(e) ?? throw new FormatException("Missing X header line.");
-            string lineY = NextNonEmpty(e) ?? throw new FormatException("Missing Y header line.");
-
-            ParseHeader(lineX, 'X', out double totalW, out int cols);
-            ParseHeader(lineY, 'Y', out double totalH, out int rows);
-
-            int expected = rows * cols;
-            var records = new List<(double nomX, double actX, double nomY, double actY)>(expected);
-
-            while (e.MoveNext())
-            {
-                var line = e.Current?.Trim();
-                if (string.IsNullOrWhiteSpace(line)) continue;
-
-                var parts = line.Split(';', StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length != 4)
-                    throw new FormatException($"Invalid data line (expected 4 fields): '{line}'");
-
-                double nomX = ParseDouble(parts[0]);
-                double actX = ParseDouble(parts[1]);
-                double nomY = ParseDouble(parts[2]);
-                double actY = ParseDouble(parts[3]);
-
-                records.Add((nomX, actX, nomY, actY));
-                if (records.Count == expected) break;
+                _offsets[(nomX, nomY)] = new Offset2D(actX - nomX, actY - nomY);
             }
+        }
 
-            if (records.Count != expected)
-                throw new FormatException($"Expected {expected} data lines but got {records.Count}.");
+        public double GetOffset(int x, int y, string method) {
+            (double xOffset, double yOffset) = GetWeights(x, y);
+            switch (method) {
+                case "bilinear":
+                    return BilinearInterpolation(x, y, xOffset, yOffset);
+                case "bicubic":
+                    return BicubicInterpolation(x, y);
+                case "cubicSpline":
+                    return CubicSplineInterpolation(x, y);
+                default:
+                    throw new ArgumentException("Unknown interpolation method.");
+            }
+        }
 
-            var xs = records.Select(r => r.nomX).Distinct().OrderBy(v => v).ToArray();
-            var ys = records.Select(r => r.nomY).Distinct().OrderBy(v => v).ToArray();
+        private (double, double) GetWeights(int x, int y) {
+            // Implement logic to determine weights for interpolation
+            return (0.0, 0.0);
+        }
 
-            if (xs.Length != cols)
-                throw new FormatException($"Header columns={cols}, but found {*
+        private double BilinearInterpolation(int x, int y, double xWeight, double yWeight) {
+            // Apply bilinear interpolation logic
+            return 0.0; // Replace with actual calculation
+        }
+
+        private double BicubicInterpolation(int x, int y) {
+            // Apply bicubic interpolation logic
+            return 0.0; // Replace with actual calculation
+        }
+
+        private double CubicSplineInterpolation(int x, int y) {
+            // Apply cubic spline interpolation logic
+            return 0.0; // Replace with actual calculation
+        }
+    }
+}
